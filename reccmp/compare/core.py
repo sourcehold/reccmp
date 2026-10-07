@@ -232,14 +232,23 @@ class Compare:
 
     @classmethod
     def from_target(
-        cls, target: RecCmpTarget, *, ignore_missing_symbols: bool = False, call_options: CallComparisonOptions | None = None
+        cls, target: RecCmpTarget,
+        *,
+        ignore_missing_symbols: bool = False,
+        call_options: CallComparisonOptions | None = None,
+        cache: bool = False,
+        invalidate_cache: bool = False
     ) -> Self:
         origfile = detect_image(filepath=target.original_path)
         recompfile = detect_image(filepath=target.recompiled_path)
 
         logger.info("Parsing %s ...", target.recompiled_pdb)
         cvdump = (
-            Cvdump(str(target.recompiled_pdb))
+            Cvdump(
+                str(target.recompiled_pdb),
+                cache=cache or invalidate_cache,
+                invalidate_cache=invalidate_cache,
+            )
             .lines()
             .globals()
             .publics()

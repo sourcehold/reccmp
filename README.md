@@ -70,6 +70,7 @@ All scripts will become available to use in your terminal with the `reccmp-` pre
   * Generate an HTML report: `reccmp-reccmp --target LEGO1 --html output.html`
   * Create a base file for diffs: `reccmp-reccmp --target LEGO1 --json base.json --silent`
   * Diff against a base file: `reccmp-reccmp --target LEGO1 --diff base.json`
+  * Reuse the dump of an unchanged PDB between runs: `reccmp-reccmp --target LEGO1 --cache` (see below)
   * Print only the comparison result, without progress and warning messages: `reccmp-reccmp --target LEGO1 --quiet` (see below)
   * Summarize annotated functions that have no symbol in the PDB: `reccmp-reccmp --target LEGO1 --ignore-missing-symbols` (see below)
   * Resolve calls that are routed through a wrapper: `reccmp-reccmp --target LEGO1 --resolve-wrapped-calls` (see below)
@@ -83,6 +84,39 @@ All scripts will become available to use in your terminal with the `reccmp-` pre
 * [`datacmp`](/reccmp/tools/datacmp.py): Compares global data found in the original with the recompiled version
   * e.g. `reccmp-datacmp --target LEGO1`
 
+### Caching the cvdump output
+
+Most of the time a `reccmp-reccmp` run spends is `cvdump.exe` dumping the debug
+information of the PDB, and the text it produces depends only on the PDB and
+the options we ask for. Runs that compare the same build again -- saving a base
+file, then diffing against it, then looking at one function -- repeat that work
+every time.
+
+`--cache` keeps the dump and reuses it while the PDB is unchanged. On one
+repo build (a 12 MB PDB, 25 MB of dump text) a run goes from 5.3 s to 2.8 s.
+
+The cache is **off by default**, deliberately: an entry that is wrongly
+considered valid would have reccmp report a comparison against a binary that no
+longer exists, and being slow is better than being wrong. An entry is used only
+when all of the following are unchanged since it was written:
+
+* the size and modification time of the PDB,
+* the set of cvdump options, and
+* the size and modification time of the bundled `cvdump.exe`.
+
+Anything else -- no entry, an entry this version of reccmp does not understand,
+an unreadable file -- is treated as a miss, and the dump is made again. The
+entry is keyed on the PDB path and the option set, so a rebuild replaces its own
+entry rather than filling the disk, and a dump is stored only once it has been
+read to the end, so an interrupted run cannot leave a truncated dump behind to
+be mistaken for a complete one.
+
+`--invalidate-cache` runs `cvdump.exe` even if an entry exists and replaces it;
+use it if you have reason to think a cached dump is wrong. It implies `--cache`.
+
+Entries are written to `$XDG_CACHE_HOME/reccmp` (`%LOCALAPPDATA%\reccmp\Cache`
+on Windows), or to `$RECCMP_CACHE_DIR` if you set it. They are plain text and
+safe to delete at any time.
 
 ### Log verbosity
 

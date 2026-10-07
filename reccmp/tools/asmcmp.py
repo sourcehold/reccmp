@@ -196,6 +196,17 @@ def parse_args() -> argparse.Namespace:
         help="Exclude LIBRARY annotations from the analysis",
     )
     parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="Reuse the saved output of cvdump.exe for an unchanged PDB, and "
+        "save it if there is nothing to reuse",
+    )
+    parser.add_argument(
+        "--invalidate-cache",
+        action="store_true",
+        help="Run cvdump.exe even if a saved dump exists, and replace it "
+        "(implies --cache)")
+    parser.add_argument(
         "--ignore-missing-symbols",
         action="store_true",
         help="Report annotated functions that have no symbol in the PDB as a "
@@ -260,11 +271,14 @@ def main() -> int:
     logging.basicConfig(level=args.loglevel, format="[%(levelname)s] %(message)s")
 
     compare = Compare.from_target(
-        target, ignore_missing_symbols=args.ignore_missing_symbols,
+        target, 
+        ignore_missing_symbols=args.ignore_missing_symbols,
         call_options=CallComparisonOptions(
             resolve_wrapped_calls=args.resolve_wrapped_calls,
             ignore_call_targets=args.ignore_call_targets,
         ),
+        cache=args.cache,
+        invalidate_cache=args.invalidate_cache
     )
 
     print()
