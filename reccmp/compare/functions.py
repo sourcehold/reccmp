@@ -11,6 +11,7 @@ from reccmp.compare.asm.call_wrappers import (
     ignore_call_targets,
     resolve_wrapped_calls,
 )
+from reccmp.compare.asm.locals import FunctionLocals, annotate_locals
 from reccmp.compare.asm.replacement import (
     create_name_lookup,
 )
@@ -94,6 +95,9 @@ class FunctionComparator:
     types: CvdumpTypesParser
     is_32bit: bool = True
     call_options: CallComparisonOptions = field(default_factory=CallComparisonOptions)
+    locals_db: dict[int, FunctionLocals] = field(default_factory=dict)
+    """Where the locals and parameters of each recomp function live, keyed by
+    the recomp address of the function. Used to name them in the diff output."""
 
     def __post_init__(self):
         self.orig_sanitize = ParseAsm(
@@ -183,7 +187,10 @@ class FunctionComparator:
         )
 
         return self._compare_function_assembly(
-            orig_combined, recomp_combined, split_points
+            orig_combined,
+            recomp_combined,
+            split_points,
+            self.locals_db.get(match.recomp_addr),
         )
 
     def _normalize_calls(
@@ -229,6 +236,7 @@ class FunctionComparator:
         orig: AsmExcerpt,
         recomp: AsmExcerpt,
         split_points: list[tuple[int, int]],
+        locals_: FunctionLocals | None = None,
     ) -> EntityCompareResult:
         # Detach addresses from asm lines for the text diff.
         orig_asm = [x[1] for x in orig]
@@ -250,6 +258,13 @@ class FunctionComparator:
             (hex(addr) if addr is not None else "", instr) for addr, instr in orig
         ]
 
+        # Name the locals and parameters for the reader. This is done after the
+        # diff so that it cannot change the match percentage: the original
+        # binary has no PDB, so these names exist on the recomp side only.
+        recomp_annotated = (
+            annotate_locals(recomp, locals_) if locals_ is not None else recomp
+        )
+
         recomp_for_printing = [
             (
                 hex(addr) if addr is not None else "",
@@ -261,7 +276,7 @@ class FunctionComparator:
                     ),
                 ),
             )
-            for line_index, (addr, instruction) in enumerate(recomp)
+            for line_index, (addr, instruction) in enumerate(recomp_annotated)
         ]
 
         return EntityCompareResult(

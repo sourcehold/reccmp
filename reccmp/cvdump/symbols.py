@@ -8,12 +8,24 @@ from reccmp.cvdump.types import CvdumpTypeKey
 logger = logging.getLogger(__name__)
 
 
+class BlockScope(NamedTuple):
+    """The code range of an S_BLOCK32 lexical block."""
+
+    section: int
+    offset: int
+    size: int
+
+
 class StackOrRegisterSymbol(NamedTuple):
     symbol_type: str
     location: str
     """Should always be set/converted to lowercase."""
     data_type: CvdumpTypeKey
     name: str
+    scope: BlockScope | None = None
+    """The innermost S_BLOCK32 the symbol was declared in, if any.
+    The variable only exists in that part of the function, so two variables
+    in sibling blocks may share a stack slot."""
 
 
 class LdataEntry(NamedTuple):
@@ -93,6 +105,14 @@ class CvdumpSymbolsParser:
 
     _flags_frame_pointer_regex = re.compile(r"\s*Flags: Frame Ptr Present$")
 
+    _block32_regex = re.compile(
+        r"\[(?P<section>\w{4}):(?P<offset>\w{8})\], Cb: (?P<size>\w+)"
+    )
+    """
+    Parses the second part of a lexical block, e.g.
+    `[0001:000C624F], Cb: 000001DA,`
+    """
+
     _register_stack_symbols = ["S_BPREL32", "S_REGISTER"]
 
     """
@@ -121,10 +141,10 @@ class CvdumpSymbolsParser:
     def __init__(self):
         self.symbols: list[SymbolsEntry] = []
         self.current_function: SymbolsEntry | None = None
-        # If we read an S_BLOCK32 node, increment this level.
-        # This is so we do not end the proc early by reading an S_END
-        # that indicates the end of the block.
-        self.block_level: int = 0
+        # The S_BLOCK32 nodes we are inside of, innermost last. We track these
+        # so we do not end the proc early by reading an S_END that indicates
+        # the end of a block, and so we know the code range of each block.
+        self.block_stack: list[BlockScope | None] = []
         self.alerted_types: set[str] = set()
         self.unhandled_lines: list[str] = []
 
@@ -190,15 +210,31 @@ class CvdumpSymbolsParser:
                 location=match.group("location").lower(),
                 data_type=CvdumpTypeKey.from_str(match.group("data_type")),
                 name=match.group("name"),
+                scope=next(
+                    (
+                        block
+                        for block in reversed(self.block_stack)
+                        if block is not None
+                    ),
+                    None,
+                ),
             )
             self.current_function.symbols.append(new_symbol)
 
         elif symbol_type == "S_BLOCK32":
-            self.block_level += 1
+            block: BlockScope | None = None
+            if second_part is not None and (
+                (match := self._block32_regex.match(second_part)) is not None
+            ):
+                block = BlockScope(
+                    section=int(match.group("section"), 16),
+                    offset=int(match.group("offset"), 16),
+                    size=int(match.group("size"), 16),
+                )
+            self.block_stack.append(block)
         elif symbol_type == "S_END":
-            if self.block_level > 0:
-                self.block_level -= 1
-                assert self.block_level >= 0
+            if self.block_stack:
+                self.block_stack.pop()
             else:
                 self.current_function = None
         elif symbol_type == "S_LDATA32":

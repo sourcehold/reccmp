@@ -54,6 +54,7 @@ from .ingest import (
     load_cvdump,
     load_cvdump_types,
     load_cvdump_lines,
+    load_cvdump_locals,
     load_markers,
     load_data_sources,
 )
@@ -153,6 +154,11 @@ class Compare:
         load_cvdump(self.cvdump_analysis, self._db, self.recomp_bin)
         load_cvdump_lines(self.cvdump_analysis, self._lines_db, self.recomp_bin)
 
+        # The locals of each function, so the diff output can name them.
+        self.function_comparator.locals_db = load_cvdump_locals(
+            self.cvdump_analysis, self.recomp_bin
+        )
+
         match_entry(self._db, self.orig_bin, self.recomp_bin)
 
         load_markers(
@@ -232,12 +238,13 @@ class Compare:
 
     @classmethod
     def from_target(
-        cls, target: RecCmpTarget,
+        cls,
+        target: RecCmpTarget,
         *,
         ignore_missing_symbols: bool = False,
         call_options: CallComparisonOptions | None = None,
         cache: bool = False,
-        invalidate_cache: bool = False
+        invalidate_cache: bool = False,
     ) -> Self:
         origfile = detect_image(filepath=target.original_path)
         recompfile = detect_image(filepath=target.recompiled_path)

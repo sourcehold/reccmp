@@ -8,7 +8,7 @@ from reccmp.formats import Image
 from reccmp.formats.exceptions import InvalidVirtualAddressError
 
 
-# pylint: disable=abstract-method
+# pylint: disable=abstract-method, unused-argument
 @dataclasses.dataclass
 class RawImage(Image):
     """Image subclass with contents declared at runtime.
@@ -47,3 +47,13 @@ class RawImage(Image):
             return (memoryview(self.data[offset:]), self.size - offset)
 
         raise InvalidVirtualAddressError
+
+    @property
+    def imagebase(self) -> int:
+        return self.base_addr
+
+    def is_relocated_addr(self, addr: int) -> bool:
+        """A raw image has no relocation table, so no address in it is
+        relocated. Tests that need an address to be recognized as one should
+        add it to the entity database instead."""
+        return False

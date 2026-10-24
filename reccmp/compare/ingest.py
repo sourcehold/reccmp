@@ -19,6 +19,7 @@ from reccmp.compare.event import (
     ReccmpReportProtocol,
     reccmp_report_nop,
 )
+from .asm.locals import FunctionLocals, LocalRegister, LocalSlot
 from .csv import ReccmpCsvParserError, ReccmpCsvFatalParserError, csv_parse
 from .db import EntityDb, entity_name_from_string
 from .lines import LinesDb
@@ -142,6 +143,65 @@ def load_cvdump_lines(
     )
 
     lines_db.mark_function_starts(tuple(seen_addrs))
+
+
+def load_cvdump_locals(
+    cvdump_analysis: CvdumpAnalysis, recomp_bin: PEImage
+) -> dict[int, FunctionLocals]:
+    """Where the locals and parameters of each recomp function live, so that we
+    can name them in the assembly we display."""
+    locals_db: dict[int, FunctionLocals] = {}
+
+    for node in cvdump_analysis.nodes:
+        symbol_entry = node.symbol_entry
+        if symbol_entry is None or not symbol_entry.symbols:
+            continue
+
+        if not recomp_bin.is_valid_section(node.section):
+            continue
+
+        slots: list[LocalSlot] = []
+        registers: list[LocalRegister] = []
+
+        for symbol in symbol_entry.symbols:
+            start: int | None = None
+            end: int | None = None
+            if symbol.scope is not None and recomp_bin.is_valid_section(
+                symbol.scope.section
+            ):
+                start = recomp_bin.get_abs_addr(
+                    symbol.scope.section, symbol.scope.offset
+                )
+                end = start + symbol.scope.size
+
+            if symbol.symbol_type == "S_REGISTER":
+                registers.append(
+                    LocalRegister(symbol.location, symbol.name, start, end)
+                )
+            elif symbol.symbol_type == "S_BPREL32":
+                # cvdump prints the frame offset as an unsigned 32-bit hex
+                # value in brackets, e.g. `[FFFFFFD0]` for -0x30.
+                try:
+                    offset = int(symbol.location.strip("[]"), 16)
+                except ValueError:
+                    continue
+
+                if offset >= 0x80000000:
+                    offset -= 0x100000000
+
+                slots.append(LocalSlot(offset, symbol.name, start, end))
+
+        if not slots and not registers:
+            continue
+
+        addr = recomp_bin.get_abs_addr(node.section, node.offset)
+        locals_db[addr] = FunctionLocals(
+            frame_pointer=symbol_entry.frame_pointer_present,
+            slots=slots,
+            registers=registers,
+        )
+
+    return locals_db
 
 
 # pylint: disable=too-many-positional-arguments, too-many-arguments
