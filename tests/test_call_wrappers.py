@@ -239,3 +239,164 @@ def test_numbers_in_mangled_name():
     assert 0x41C310 in set(numbers_in_name(name))
     # "$0A@" is the value 0 and must not be mistaken for an address.
     assert 0 not in set(numbers_in_name(name))
+
+
+# Resolver instantiation for the function at the target of a 5-byte JMP
+# (the tail call) starting at ORIG_BASE.
+ORIG_JUMP_TARGET = ORIG_BASE + 5
+RECOMP_JUMP_TARGET = RECOMP_BASE + 5
+
+ORIG_JUMP_WRAPPER_NAME = (
+    "FunctionResolver::Resolver<void (__thiscall A::B::*)(int),0,"
+    f"{ORIG_JUMP_TARGET},&A::B::f,0>::CallHelper<void,void>::call"
+)
+
+
+def test_resolve_wrapped_tail_calls():
+    """A tail call is a 5-byte JMP in place of a CALL. The wrapper name embeds
+    the orig address, so we use the text from the orig side."""
+    recomp: AsmExcerpt = [(0x500, "jmp " + WRAPPER_NAME)]
+    assert resolve_wrapped_calls(recomp, {}, {0x1234000: "<OFFSET12>"}) == [
+        (0x500, "jmp <OFFSET12>"),
+    ]
+    assert resolve_wrapped_calls(recomp, {}, {0x1234000: "A::B::f"}) == [
+        (0x500, "jmp A::B::f"),
+    ]
+
+
+def test_resolve_wrapped_tail_calls_no_match():
+    """Leave the JMP alone if no jump target has that address."""
+    recomp: AsmExcerpt = [(0x500, "jmp " + WRAPPER_NAME)]
+    assert resolve_wrapped_calls(recomp, {}, {0x5555000: "<OFFSET12>"}) == recomp
+    assert resolve_wrapped_calls(recomp, {}, {}) == recomp
+    # A call target is not a jump target: the mnemonics must agree.
+    assert resolve_wrapped_calls(recomp, {0x1234000: "<OFFSET12>"}, {}) == recomp
+
+
+def test_resolve_wrapped_tail_calls_ignores_displacement():
+    """A JMP shown as a displacement is a jump inside the function.
+    It is not a tail call and must never be rewritten."""
+    recomp: AsmExcerpt = [(0x500, "jmp -0x1234000"), (0x505, "jmp 0x1234000")]
+    assert resolve_wrapped_calls(recomp, {}, {0x1234000: "<OFFSET12>"}) == recomp
+
+
+def test_resolve_wrapped_tail_calls_ignores_placeholder():
+    """Not a wrapper name, so there is no original address to read."""
+    recomp: AsmExcerpt = [(0x500, "jmp <OFFSET1>")]
+    assert resolve_wrapped_calls(recomp, {}, {0x1234000: "<OFFSET12>"}) == recomp
+
+
+def _compare_tail_call(
+    db: EntityDb,
+    lines_db: LinesDb,
+    report: ReccmpReportProtocol,
+    call_options: CallComparisonOptions,
+    recomp_target_name: str,
+):
+    """Compares two functions that each consist of a 5-byte JMP (a tail call).
+    The orig jump target is not annotated, while the recomp jump target is the
+    resolver instantiation `recomp_target_name`.
+    """
+    code = b"\xe9\x00\x00\x00\x00"
+
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            ORIG_BASE,
+            type=EntityType.FUNCTION,
+            name="test",
+            size=len(code),
+        )
+        batch.set(
+            ImageId.RECOMP,
+            RECOMP_BASE,
+            type=EntityType.FUNCTION,
+            name="test",
+            size=len(code),
+        )
+        batch.match(ORIG_BASE, RECOMP_BASE)
+
+        batch.set(
+            ImageId.RECOMP,
+            RECOMP_JUMP_TARGET,
+            type=EntityType.FUNCTION,
+            name=recomp_target_name,
+            size=1,
+        )
+
+    orig_bin = RawImage.from_memory(code, base_addr=ORIG_BASE)
+    recomp_bin = RawImage.from_memory(code, base_addr=RECOMP_BASE)
+
+    comp = FunctionComparator(
+        db,
+        lines_db,
+        orig_bin,
+        recomp_bin,
+        report,
+        CvdumpTypesParser(),
+        call_options=call_options,
+    )
+    (entity,) = list(db.get_functions())
+    return comp.compare_function(entity)
+
+
+def test_compare_function_wrapped_tail_call_mismatch(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    """Without any option, the wrapper name does not match the orig tail call."""
+    result = _compare_tail_call(
+        db, lines_db, report, CallComparisonOptions(), ORIG_JUMP_WRAPPER_NAME
+    )
+    assert result.match_ratio != 1.0
+
+
+def test_compare_function_wrapped_tail_call_resolved(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    """The wrapper name embeds the orig address of the tail call target, so the
+    function is a 100% match with --resolve-wrapped-calls."""
+    result = _compare_tail_call(
+        db,
+        lines_db,
+        report,
+        CallComparisonOptions(resolve_wrapped_calls=True),
+        ORIG_JUMP_WRAPPER_NAME,
+    )
+    assert result.match_ratio == 1.0
+
+
+def test_compare_function_wrong_tail_call_still_mismatches(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    """A wrapper for a different original function is a real mismatch and must
+    still be reported with --resolve-wrapped-calls."""
+    wrong_name = ORIG_JUMP_WRAPPER_NAME.replace(
+        str(ORIG_JUMP_TARGET), str(ORIG_JUMP_TARGET + 0x100)
+    )
+    result = _compare_tail_call(
+        db,
+        lines_db,
+        report,
+        CallComparisonOptions(resolve_wrapped_calls=True),
+        wrong_name,
+    )
+    assert result.match_ratio != 1.0
+
+
+def test_compare_function_wrapped_tail_call_mangled_name(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    """A PDB gives the resolver's mangled name, where the orig address is an
+    MSVC-encoded template argument (0x401005 == "$0EABAAF@")."""
+    mangled_name = (
+        "?get@?$Function@U?$Resolver@P8B@A@@AEXH@Z$0A@$0EABAAF@"
+        "$1?f@B@A@@QAEXH@Z$0A@@FunctionResolver@@@SAP8B@A@@AEXH@ZXZ"
+    )
+    result = _compare_tail_call(
+        db,
+        lines_db,
+        report,
+        CallComparisonOptions(resolve_wrapped_calls=True),
+        mangled_name,
+    )
+    assert result.match_ratio == 1.0

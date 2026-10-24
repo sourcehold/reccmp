@@ -75,7 +75,8 @@ class CallComparisonOptions:
 
     resolve_wrapped_calls: bool = False
     """If the name of a recomp call target embeds the original address of one of
-    the call targets in the original function, treat the two calls as equal."""
+    the call targets in the original function, treat the two calls as equal.
+    Applies to tail calls (a 5-byte JMP to the function) as well."""
 
     ignore_call_targets: bool = False
     """Replace the target of every CALL with a placeholder on both sides so that
@@ -198,7 +199,11 @@ class FunctionComparator:
         if self.call_options.resolve_wrapped_calls:
             return (
                 orig,
-                resolve_wrapped_calls(recomp, self.orig_sanitize.call_targets),
+                resolve_wrapped_calls(
+                    recomp,
+                    self.orig_sanitize.call_targets,
+                    self.orig_sanitize.jump_targets,
+                ),
             )
 
         return (orig, recomp)

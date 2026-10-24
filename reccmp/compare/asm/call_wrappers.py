@@ -13,6 +13,13 @@ where the original assembly reads
 The two instructions are equivalent, but the diff counts them as a mismatch,
 which makes it impossible for such a function to reach a 100% match.
 
+The same applies to a *tail call*, where the compiler emits a 5-byte near JMP
+to the function instead of a CALL followed by a RET. The recomp side then reads
+
+    jmp FunctionResolver::Resolver<...>::call
+
+and the handling is identical apart from the mnemonic.
+
 Two strategies are provided here:
 
 * `resolve_wrapped_calls`: the original address of the call target appears
@@ -69,6 +76,26 @@ def _call_operand(instruction: str) -> str:
     return instruction[len("call ") :].strip()
 
 
+def _is_tail_jump(instruction: str) -> bool:
+    """A JMP whose operand is a symbol name rather than a displacement.
+    The parser only names the target of a JMP that goes to a known function,
+    so this is the tail call we are interested in."""
+    if not instruction.startswith("jmp "):
+        return False
+
+    operand = instruction[len("jmp ") :].strip()
+    # A plain (possibly negative) hex number is a jump displacement inside the
+    # function, not a named target.
+    return _JUMP_DISPLACEMENT.fullmatch(operand) is None
+
+
+def _jump_operand(instruction: str) -> str:
+    return instruction[len("jmp ") :].strip()
+
+
+_JUMP_DISPLACEMENT = re.compile(r"-?0x[0-9a-fA-F]+")
+
+
 def numbers_in_name(name: str) -> Iterable[int]:
     """Every number embedded in the given symbol name that could be an address."""
     for match in _NUMBER_TOKEN.finditer(name):
@@ -87,31 +114,55 @@ def numbers_in_name(name: str) -> Iterable[int]:
             yield value
 
 
+def _resolve(
+    mnemonic: str, operand: str, orig_targets: Mapping[int, str]
+) -> str | None:
+    """The replacement instruction for a wrapped CALL/JMP, or None if the
+    operand does not name a wrapper for one of `orig_targets`."""
+    # Don't touch a target we could not give a name to: there is no wrapper
+    # name to read an original address from.
+    if operand.startswith("<OFFSET"):
+        return None
+
+    for value in numbers_in_name(operand):
+        orig_text = orig_targets.get(value)
+        if orig_text is not None:
+            return f"{mnemonic} {orig_text}"
+
+    return None
+
+
 def resolve_wrapped_calls(
-    recomp: AsmExcerpt, orig_call_targets: Mapping[int, str]
+    recomp: AsmExcerpt,
+    orig_call_targets: Mapping[int, str],
+    orig_jump_targets: Mapping[int, str] | None = None,
 ) -> AsmExcerpt:
     """Rewrite each recomp CALL whose target name embeds the original address of
     one of the CALL targets in the original function. The replacement is the
     text used by the original instruction, so the diff lines become identical.
 
+    Tail calls are handled the same way: a recomp 5-byte JMP to a wrapper is
+    rewritten using the text of the JMP at that point in the original function.
+
     `orig_call_targets` maps the (absolute) target address of each direct CALL
     in the original function to the operand text used for it in the diff.
+    `orig_jump_targets` does the same for each 5-byte JMP.
     """
-    if not orig_call_targets:
+    if not orig_call_targets and not orig_jump_targets:
         return recomp
 
     output: AsmExcerpt = []
     for addr, instruction in recomp:
-        if _is_call(instruction):
-            operand = _call_operand(instruction)
-            # Don't touch a call we could not give a name to: there is no
-            # wrapper name to read an original address from.
-            if not operand.startswith("<OFFSET"):
-                for value in numbers_in_name(operand):
-                    orig_text = orig_call_targets.get(value)
-                    if orig_text is not None:
-                        instruction = "call " + orig_text
-                        break
+        if orig_call_targets and _is_call(instruction):
+            replacement = _resolve(
+                "call", _call_operand(instruction), orig_call_targets
+            )
+            if replacement is not None:
+                instruction = replacement
+        elif orig_jump_targets and _is_tail_jump(instruction):
+            replacement = _resolve("jmp", _jump_operand(instruction), orig_jump_targets)
+            if replacement is not None:
+                instruction = replacement
 
         output.append((addr, instruction))
 

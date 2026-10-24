@@ -176,10 +176,10 @@ def parse_args() -> argparse.Namespace:
         "--resolve-wrapped-calls",
         action="store_true",
         help=(
-            "Treat a recomp CALL as a match if the name of its target embeds the "
-            "original address of the function called at that point in the original "
-            "binary. For projects that route calls to original functions through a "
-            "resolver/wrapper template."
+            "Treat a recomp CALL (or a tail call: a 5-byte JMP) as a match if the "
+            "name of its target embeds the original address of the function called "
+            "at that point in the original binary. For projects that route calls to "
+            "original functions through a resolver/wrapper template."
         ),
     )
     parser.add_argument(

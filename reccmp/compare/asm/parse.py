@@ -22,6 +22,11 @@ displace_replace_regex = re.compile(r"(?<= )(0x[0-9a-f]+)(?=\])")
 # For matching an immediate value operand
 immediate_replace_regex = re.compile(r"(?<=, )(0x[0-9a-f]+)")
 
+# Size in bytes of a near JMP with a 32-bit relative displacement (opcode 0xE9).
+# A tail call uses this encoding; a jump inside the function usually fits in the
+# 2-byte short form.
+TAIL_CALL_JMP_SIZE = 5
+
 
 @cache
 def from_hex(string: str) -> int | None:
@@ -50,12 +55,17 @@ class ParseAsm:
         # operand text used for it. Consumers use this to detect calls that
         # are routed through a wrapper function in the other binary.
         self.call_targets: dict[int, str] = {}
+        # Target address of each 5-byte near JMP in the function, mapped to the
+        # operand text used for it. These are the tail calls: a JMP to another
+        # function in place of a CALL followed by a RET.
+        self.jump_targets: dict[int, str] = {}
         self.number_placeholders = True
 
     def reset(self):
         self.replacements = {}
         self.indirect_replacements = {}
         self.call_targets = {}
+        self.jump_targets = {}
 
     def replacement_names(self) -> set[str]:
         """Every name or placeholder substituted into the asm of the last parse."""
@@ -178,12 +188,20 @@ class ParseAsm:
                 # fall through to generic jump handling below.
                 potential_name = self.lookup(op_str_address, exact=True)
                 if potential_name is not None:
+                    if inst_size == TAIL_CALL_JMP_SIZE:
+                        self.jump_targets[op_str_address] = potential_name
                     return (inst_mnemonic, potential_name)
 
             # Else: this is any jump
             # Show the jump offset rather than the absolute address
             jump_displacement = op_str_address - (inst_address + inst_size)
-            return (inst_mnemonic, hex(jump_displacement))
+            replacement = hex(jump_displacement)
+            if inst_mnemonic == "jmp" and inst_size == TAIL_CALL_JMP_SIZE:
+                # A tail call to a function we have no name for. Record it
+                # anyway: the other binary may reach the same function via a
+                # wrapper whose name embeds this address.
+                self.jump_targets[op_str_address] = replacement
+            return (inst_mnemonic, replacement)
 
         if inst_mnemonic == "call":
             # Special handling for absolute indirect CALL.
