@@ -7,6 +7,7 @@ so that virtual addresses are replaced by symbol name or a generic
 placeholder string."""
 
 import re
+from collections.abc import Collection
 from functools import cache
 from typing_extensions import Buffer
 from .const import JUMP_MNEMONICS, SINGLE_OPERAND_INSTS
@@ -59,6 +60,16 @@ class ParseAsm:
         # operand text used for it. These are the tail calls: a JMP to another
         # function in place of a CALL followed by a RET.
         self.jump_targets: dict[int, str] = {}
+        # Every value we weighed up as a possible address, whether or not we
+        # went on to replace it. Comparing these between the two binaries is
+        # what tells a constant apart from an address: see `shared_constants`.
+        self.tested_values: set[int] = set()
+        # Of those, the ones we replaced without being able to name the entity
+        # they start, so the evidence that they are addresses is only that they
+        # fall somewhere inside something we know about.
+        self.uncertain_values: set[int] = set()
+        # Values to leave alone because we have decided they are constants.
+        self.constant_veto: frozenset[int] = frozenset()
         self.number_placeholders = True
 
     def reset(self):
@@ -66,6 +77,8 @@ class ParseAsm:
         self.indirect_replacements = {}
         self.call_targets = {}
         self.jump_targets = {}
+        self.tested_values = set()
+        self.uncertain_values = set()
 
     def replacement_names(self) -> set[str]:
         """Every name or placeholder substituted into the asm of the last parse."""
@@ -109,6 +122,31 @@ class ParseAsm:
         self.replacements[addr] = placeholder
         return placeholder
 
+    def address_operand(self, value: int) -> str | None:
+        """A replacement for an operand we think holds the address `value`, or
+        None if we have decided the value is a constant.
+
+        Unlike a pointer in a memory operand, a bare number in the code can
+        just as easily be an integer the program works with. We only have a
+        name for the thing it would point at, which is weak evidence: a large
+        struct or a function covers a wide range of addresses, and any constant
+        that happens to land inside one looks like a pointer into it. So record
+        how sure we are, for `shared_constants` to settle.
+
+        The caller records the value in `tested_values` first, because a value
+        this side does *not* take for an address is exactly the evidence the
+        other side needs.
+        """
+        if value in self.constant_veto:
+            return None
+
+        # Naming the exact start of an entity is good evidence. Landing inside
+        # one, or not being able to name it at all, is not.
+        if self.lookup(value, exact=True) is None:
+            self.uncertain_values.add(value)
+
+        return self.replace(value)
+
     def indirect_replace(self, addr: int) -> str:
         if addr in self.indirect_replacements:
             return self.indirect_replacements[addr]
@@ -131,8 +169,11 @@ class ParseAsm:
         use the placeholder if we are certain that this is a valid address.
         We can check the relocation table to find out."""
         value = int(match.group(1), 16)
+        self.tested_values.add(value)
         if self.is_addr(value):
-            return self.replace(value)
+            replacement = self.address_operand(value)
+            if replacement is not None:
+                return replacement
 
         return match.group(0)
 
@@ -140,8 +181,19 @@ class ParseAsm:
         """For replacing immediate value operands. Here we replace the value
         only if the name lookup returns something. Do not use a placeholder."""
         value = int(match.group(1), 16)
+        self.tested_values.add(value)
+        if value in self.constant_veto:
+            return match.group(0)
+
+        # Ask about the exact address first, so that the lookup for the name we
+        # actually use is the last one we make.
+        names_an_entity = self.lookup(value, exact=True) is not None
+
         placeholder = self.lookup(value)
         if placeholder is not None:
+            if not names_an_entity:
+                self.uncertain_values.add(value)
+
             return placeholder
 
         return match.group(0)
@@ -175,8 +227,11 @@ class ParseAsm:
                 return (inst_mnemonic, replacement)
 
             if inst_mnemonic == "push":
+                self.tested_values.add(op_str_address)
                 if self.is_addr(op_str_address):
-                    return (inst_mnemonic, self.replace(op_str_address))
+                    pushed = self.address_operand(op_str_address)
+                    if pushed is not None:
+                        return (inst_mnemonic, pushed)
 
                 # To avoid falling into jump handling
                 return (inst_mnemonic, inst_op_str)
@@ -224,8 +279,14 @@ class ParseAsm:
 
         return (inst_mnemonic, op_str)
 
-    def parse_asm(self, data: Buffer, start_addr: int) -> AsmExcerpt:
+    def parse_asm(
+        self,
+        data: Buffer,
+        start_addr: int,
+        constant_veto: Collection[int] = (),
+    ) -> AsmExcerpt:
         self.reset()
+        self.constant_veto = frozenset(constant_veto)
         asm: AsmExcerpt = []
 
         ig = InstructGen(bytes(data), start_addr, self.is_32bit)
@@ -271,3 +332,25 @@ class ParseAsm:
                     asm.append((ofs, hex(b)))
 
         return asm
+
+
+def shared_constants(orig: "ParseAsm", recomp: "ParseAsm") -> frozenset[int]:
+    """The values that both binaries use as a bare number, where at least one
+    of them took the number for an address without being able to name what it
+    starts.
+
+    Two matched variables do not live at the same address: the two images are
+    laid out independently, so the orig code and the recomp code hold different
+    numbers for the same variable and we rely on naming them to line the two
+    sides up. A number that is *identical* in both is therefore not an address
+    but a constant from the source, and naming it on one side only is what
+    makes an otherwise perfect function fall short of 100%.
+
+    Leaving such a value alone is safe either way: if it really were the same
+    address in both images, the two sides would still read the same.
+    """
+    shared = orig.tested_values & recomp.tested_values
+    if not shared:
+        return frozenset()
+
+    return frozenset(shared & (orig.uncertain_values | recomp.uncertain_values))

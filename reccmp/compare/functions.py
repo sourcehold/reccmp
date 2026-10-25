@@ -6,7 +6,7 @@ from typing import Callable, Iterator
 from reccmp.compare.lines import LinesDb
 from reccmp.compare.pinned_sequences import SequenceMatcherWithPins
 from reccmp.compare.asm.fixes import assert_fixup, find_effective_match
-from reccmp.compare.asm.parse import AsmExcerpt, ParseAsm
+from reccmp.compare.asm.parse import AsmExcerpt, ParseAsm, shared_constants
 from reccmp.compare.asm.call_wrappers import (
     ignore_call_targets,
     resolve_wrapped_calls,
@@ -168,6 +168,19 @@ class FunctionComparator:
 
         orig_combined = self.orig_sanitize.parse_asm(orig_raw, match.orig_addr)
         recomp_combined = self.recomp_sanitize.parse_asm(recomp_raw, match.recomp_addr)
+
+        # A number that is the same on both sides is a constant from the source,
+        # not an address, however much it looks like one. Read the function
+        # again with those values left alone. Only the rare function that has
+        # one pays for the second pass.
+        veto = shared_constants(self.orig_sanitize, self.recomp_sanitize)
+        if veto:
+            orig_combined = self.orig_sanitize.parse_asm(
+                orig_raw, match.orig_addr, constant_veto=veto
+            )
+            recomp_combined = self.recomp_sanitize.parse_asm(
+                recomp_raw, match.recomp_addr, constant_veto=veto
+            )
 
         # Check for assert calls only if we expect to find them
         if has_asserts(self.orig_bin):
