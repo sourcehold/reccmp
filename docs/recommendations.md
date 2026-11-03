@@ -104,3 +104,55 @@ never reach 100%. `reccmp-reccmp` offers two options for this situation:
   `--ignore-call-targets` wins.
 
 Neither option is enabled by default.
+
+## The stack security cookie (`/GS`)
+
+A function compiled with `/GS` that needs a stack guard (in practice, any
+function with a local array) reads the global security cookie in its prologue
+and validates it in its epilogue:
+
+```
+mov eax, dword ptr [__security_cookie]
+xor eax, esp
+mov dword ptr [esp + 0x1c], eax
+...
+mov ecx, dword ptr [esp + 0x1c]
+xor ecx, esp
+call __security_check_cookie
+```
+
+The cookie global and the check function come from the compiler and the CRT,
+not from the source, so the recomp binary has its own copy of both at its own
+address while the original reads its own. reccmp names each side after the
+entity it finds at that address, and the diff reads
+
+```
+-mov eax, dword ptr [StructResolver::Instance<unsigned int,12141088>::instance (DATA)]
++mov eax, dword ptr [__security_cookie (DATA)]
+```
+
+Nothing is wrong with the recompiled code, but the function cannot reach 100%.
+
+`--ignore-security-cookie` replaces the cookie operand with a
+`<SECURITY_COOKIE>` placeholder, and the target of the check call with a
+`<SECURITY_CHECK_COOKIE>` placeholder, in **both** binaries, so those operands
+never contribute to the difference. The option is not enabled by default.
+
+The idiom is recognized by its shape rather than by the name of the symbol,
+because the two binaries do not agree on that name:
+
+* a load from a named memory location immediately followed by
+  `xor <the same register>, esp` (or `ebp`) is the cookie read;
+* a direct call immediately preceded by `xor <register>, esp` (or `ebp`) is
+  the call to the cookie check function.
+
+Only the operand is replaced. The instructions themselves, the register used
+and the stack slot the cookie is written to all still count, so a function
+that gets its stack guard wrong is still reported as a mismatch. A global that
+is read but not mixed with the stack pointer is left alone.
+
+An alternative is to make the recompiled binary use the original's cookie: in
+MASM, define `__security_cookie`, `__security_cookie_complement` and a stubbed
+`__security_init_cookie` at the original addresses so that the CRT's
+`gs_cookie.obj` is never linked. That changes the binary you ship, while this
+option changes only the comparison.

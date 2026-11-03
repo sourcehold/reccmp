@@ -12,6 +12,7 @@ from reccmp.compare.asm.call_wrappers import (
     resolve_wrapped_calls,
 )
 from reccmp.compare.asm.locals import FunctionLocals, annotate_locals
+from reccmp.compare.asm.security_cookie import ignore_security_cookie
 from reccmp.compare.asm.replacement import (
     create_name_lookup,
 )
@@ -71,8 +72,9 @@ def create_bin_lookup(bin_file: Image) -> Callable[[int], int | None]:
 
 @dataclass
 class CallComparisonOptions:
-    """Options to deal with recomp binaries where calls to original functions
-    are routed through a wrapper (resolver) function."""
+    """Options to deal with instructions that cannot match by construction:
+    calls to original functions that are routed through a wrapper (resolver)
+    function, and compiler-generated references to the stack security cookie."""
 
     resolve_wrapped_calls: bool = False
     """If the name of a recomp call target embeds the original address of one of
@@ -82,6 +84,11 @@ class CallComparisonOptions:
     ignore_call_targets: bool = False
     """Replace the target of every CALL with a placeholder on both sides so that
     call targets never contribute to the diff."""
+
+    ignore_security_cookie: bool = False
+    """Replace the MSVC stack security cookie global and the cookie check
+    function with a placeholder on both sides, so that the `/GS` prologue and
+    epilogue of a function never contribute to the diff."""
 
 
 @dataclass
@@ -189,7 +196,7 @@ class FunctionComparator:
         if has_asserts(self.recomp_bin):
             assert_fixup(recomp_combined)
 
-        orig_combined, recomp_combined = self._normalize_calls(
+        orig_combined, recomp_combined = self._normalize_asm(
             orig_combined, recomp_combined
         )
 
@@ -206,10 +213,16 @@ class FunctionComparator:
             self.locals_db.get(match.recomp_addr),
         )
 
-    def _normalize_calls(
+    def _normalize_asm(
         self, orig: AsmExcerpt, recomp: AsmExcerpt
     ) -> tuple[AsmExcerpt, AsmExcerpt]:
-        """Apply the configured CALL normalization to the asm of both binaries."""
+        """Apply the configured normalization to the asm of both binaries."""
+        if self.call_options.ignore_security_cookie:
+            orig = ignore_security_cookie(orig, self.orig_sanitize.replacement_names())
+            recomp = ignore_security_cookie(
+                recomp, self.recomp_sanitize.replacement_names()
+            )
+
         if self.call_options.ignore_call_targets:
             return (
                 ignore_call_targets(orig, self.orig_sanitize.replacement_names()),

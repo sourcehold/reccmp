@@ -75,6 +75,7 @@ All scripts will become available to use in your terminal with the `reccmp-` pre
   * Summarize annotated functions that have no symbol in the PDB: `reccmp-reccmp --target LEGO1 --ignore-missing-symbols` (see below)
   * Resolve calls that are routed through a wrapper: `reccmp-reccmp --target LEGO1 --resolve-wrapped-calls` (see below)
   * Ignore call targets entirely: `reccmp-reccmp --target LEGO1 --ignore-call-targets`
+  * Ignore the MSVC stack security cookie (`/GS`): `reccmp-reccmp --target LEGO1 --ignore-security-cookie` (see below)
 * [`stackcmp`](/reccmp/tools/stackcmp.py): Compares the stack layout for a given function that almost matches.
   * e.g. `reccmp-stackcmp --target BETA10 0x1007165d`
 * [`roadmap`](/reccmp/tools/roadmap.py): Compares symbol locations in an original binary with the same symbol locations of a recompiled binary

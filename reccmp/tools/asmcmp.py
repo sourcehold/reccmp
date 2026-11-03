@@ -191,6 +191,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--ignore-security-cookie",
+        action="store_true",
+        help=(
+            "Ignore references to the MSVC stack security cookie (/GS): the "
+            "cookie global read in the prologue and the cookie check function "
+            "called in the epilogue are replaced by a placeholder in both "
+            "binaries, so that they never count towards the difference."
+        ),
+    )
+    parser.add_argument(
         "--nolib",
         action="store_true",
         help="Exclude LIBRARY annotations from the analysis",
@@ -276,6 +286,7 @@ def main() -> int:
         call_options=CallComparisonOptions(
             resolve_wrapped_calls=args.resolve_wrapped_calls,
             ignore_call_targets=args.ignore_call_targets,
+            ignore_security_cookie=args.ignore_security_cookie,
         ),
         cache=args.cache,
         invalidate_cache=args.invalidate_cache
