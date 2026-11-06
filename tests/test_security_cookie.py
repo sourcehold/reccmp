@@ -78,6 +78,139 @@ def test_ignore_security_cookie_epilogue():
     ]
 
 
+def test_ignore_security_cookie_epilogue_with_scheduled_store():
+    """The compiler puts unrelated work between the XOR and the check call.
+    Observed in OpenSHC's MenuItemRenderFunction_SingleplayerMapChoice_MapTable,
+    where requiring adjacency left the call in the diff at 99.4%."""
+    excerpt: AsmExcerpt = [
+        (0x600, "mov ecx, dword ptr [esp + 0x2c]"),
+        (0x604, "pop esi"),
+        (0x605, "xor ecx, esp"),
+        (0x607, "mov dword ptr [SomeGlobal + 4], 1"),
+        (0x60E, "call __security_check_cookie"),
+        (0x613, "add esp, 0x2c"),
+        (0x616, "ret"),
+    ]
+    assert ignore_security_cookie(excerpt, {"__security_check_cookie"})[4] == (
+        0x60E,
+        f"call {CHECK_PLACEHOLDER}",
+    )
+
+
+def test_ignore_security_cookie_epilogue_register_reassigned():
+    """A write to the register in between means the call does not receive the
+    cookie, so this is not the idiom."""
+    excerpt: AsmExcerpt = [
+        (0x600, "mov ecx, dword ptr [esp + 0x1c]"),
+        (0x604, "xor ecx, esp"),
+        (0x606, "mov ecx, 1"),
+        (0x60B, "call SomeFunction"),
+    ]
+    assert ignore_security_cookie(excerpt, {"SomeFunction"}) == excerpt
+
+
+def test_ignore_security_cookie_epilogue_partial_register_reassigned():
+    """`cl` is part of `ecx`, so writing it also breaks the chain."""
+    excerpt: AsmExcerpt = [
+        (0x600, "mov ecx, dword ptr [esp + 0x1c]"),
+        (0x604, "xor ecx, esp"),
+        (0x606, "mov cl, 1"),
+        (0x60B, "call SomeFunction"),
+    ]
+    assert ignore_security_cookie(excerpt, {"SomeFunction"}) == excerpt
+
+
+def test_ignore_security_cookie_epilogue_memory_write_is_not_a_reassignment():
+    """Writing through the register only reads it."""
+    excerpt: AsmExcerpt = [
+        (0x600, "mov ecx, dword ptr [esp + 0x1c]"),
+        (0x604, "xor ecx, esp"),
+        (0x606, "mov dword ptr [ecx], 1"),
+        (0x60B, "call __security_check_cookie"),
+    ]
+    assert ignore_security_cookie(excerpt, {"__security_check_cookie"})[3] == (
+        0x60B,
+        f"call {CHECK_PLACEHOLDER}",
+    )
+
+
+def test_ignore_security_cookie_epilogue_branch_stops_the_search():
+    """A jump between the two means they are not on one path."""
+    excerpt: AsmExcerpt = [
+        (0x600, "mov ecx, dword ptr [esp + 0x1c]"),
+        (0x604, "xor ecx, esp"),
+        (0x606, "je 0x620"),
+        (0x60B, "call __security_check_cookie"),
+    ]
+    assert ignore_security_cookie(excerpt, {"__security_check_cookie"}) == excerpt
+
+
+def test_ignore_security_cookie_epilogue_earlier_call_stops_the_search():
+    """Only the first call after the XOR can be the check."""
+    excerpt: AsmExcerpt = [
+        (0x600, "mov ecx, dword ptr [esp + 0x1c]"),
+        (0x604, "xor ecx, esp"),
+        (0x606, "call SomeOtherFunction"),
+        (0x60B, "call __security_check_cookie"),
+    ]
+    assert ignore_security_cookie(excerpt, {"__security_check_cookie"}) == excerpt
+
+
+def test_ignore_security_cookie_epilogue_too_far_away():
+    """Past the scheduling window the shape is a coincidence, not the idiom."""
+    excerpt: AsmExcerpt = [
+        (0x600, "xor ecx, esp"),
+        (0x602, "nop"),
+        (0x603, "nop"),
+        (0x604, "nop"),
+        (0x605, "nop"),
+        (0x606, "call __security_check_cookie"),
+    ]
+    assert ignore_security_cookie(excerpt, {"__security_check_cookie"}) == excerpt
+
+
+def test_ignore_security_cookie_prologue_with_scheduled_instruction():
+    """The load does not have to be adjacent to the XOR either."""
+    excerpt: AsmExcerpt = [
+        (0x500, f"mov eax, dword ptr [{ORIG_COOKIE_NAME}]"),
+        (0x506, "push ebx"),
+        (0x507, "xor eax, esp"),
+        (0x509, "mov dword ptr [esp + 0x1c], eax"),
+    ]
+    assert ignore_security_cookie(excerpt, {ORIG_COOKIE_NAME})[0] == (
+        0x500,
+        f"mov eax, dword ptr [{COOKIE_PLACEHOLDER}]",
+    )
+
+
+def test_ignore_security_cookie_prologue_nearest_write_wins():
+    """If something else assigned the register after the load, the value mixed
+    with the stack pointer is not the global."""
+    excerpt: AsmExcerpt = [
+        (0x500, f"mov eax, dword ptr [{ORIG_COOKIE_NAME}]"),
+        (0x506, "mov eax, 7"),
+        (0x50B, "xor eax, esp"),
+    ]
+    assert ignore_security_cookie(excerpt, {ORIG_COOKIE_NAME}) == excerpt
+
+
+def test_ignore_security_cookie_prologue_does_not_claim_the_next_call():
+    """The prologue XOR must not be searched forward: the next call belongs to
+    the function, not to the stack guard. Relaxing the adjacency requirement
+    without distinguishing the two halves erases a real call target."""
+    excerpt: AsmExcerpt = [
+        (0x500, f"mov eax, dword ptr [{ORIG_COOKIE_NAME}]"),
+        (0x505, "xor eax, esp"),
+        (0x507, "mov dword ptr [esp + 0x1c], eax"),
+        (0x50B, "push ebx"),
+        (0x50C, "call SomeRealFunction"),
+    ]
+    result = ignore_security_cookie(excerpt, {ORIG_COOKIE_NAME, "SomeRealFunction"})
+    assert result[4] == (0x50C, "call SomeRealFunction")
+    # ... while the cookie read itself is still normalized.
+    assert result[0] == (0x500, f"mov eax, dword ptr [{COOKIE_PLACEHOLDER}]")
+
+
 def test_ignore_security_cookie_stack_read_is_not_the_cookie():
     """The epilogue reads the saved cookie from the stack. That operand is not
     a name, so it must be left alone."""
