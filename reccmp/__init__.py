@@ -1,1 +1,1 @@
-VERSION = "0.1.7+sourcehold"
+VERSION = "0.1.7+sourcehold.2"
