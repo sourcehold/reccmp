@@ -9,7 +9,14 @@ from reccmp.compare.asm.fixes import assert_fixup, find_effective_match
 from reccmp.compare.asm.parse import AsmExcerpt, ParseAsm, shared_constants
 from reccmp.compare.asm.call_wrappers import (
     ignore_call_targets,
+    numbers_in_name,
     resolve_wrapped_calls,
+)
+from reccmp.compare.asm.equivalence import (
+    CalleeInfo,
+    analyze_callee,
+    find_semantic_match,
+    return_kind_from_symbol,
 )
 from reccmp.compare.asm.locals import FunctionLocals, annotate_locals
 from reccmp.compare.asm.security_cookie import ignore_security_cookie
@@ -25,7 +32,7 @@ from reccmp.formats.exceptions import (
     InvalidVirtualReadError,
 )
 from reccmp.formats import Image, PEImage
-from reccmp.types import ImageId
+from reccmp.types import EntityType, ImageId
 
 
 def has_asserts(image: Image) -> bool:
@@ -90,6 +97,14 @@ class CallComparisonOptions:
     function with a placeholder on both sides, so that the `/GS` prologue and
     epilogue of a function never contribute to the diff."""
 
+    semantic_match: bool = False
+    """When the diff is not 100% and the register-swap check does not explain
+    it, execute both functions symbolically and report an effective match if
+    they read and write the same memory, make the same calls with the same
+    arguments, branch on the same conditions and return the same values. This
+    accepts differences in register allocation, stack slot assignment,
+    instruction order and block layout that do not change what the function does."""
+
 
 @dataclass
 class FunctionComparator:
@@ -105,6 +120,8 @@ class FunctionComparator:
     locals_db: dict[int, FunctionLocals] = field(default_factory=dict)
     """Where the locals and parameters of each recomp function live, keyed by
     the recomp address of the function. Used to name them in the diff output."""
+    callee_memo: dict[int, CalleeInfo] = field(default_factory=dict)
+    """The calling convention of each original function called, for `semantic_match`."""
 
     def __post_init__(self):
         self.orig_sanitize = ParseAsm(
@@ -129,6 +146,60 @@ class FunctionComparator:
             ),
             is_32bit=self.is_32bit,
         )
+
+    def _read_orig(self, addr: int, size: int) -> bytes | None:
+        try:
+            return self.orig_bin.read(addr, size)
+        except (InvalidVirtualAddressError, InvalidVirtualReadError):
+            return None
+
+    def _tail_call_name(self, img: ImageId, addr: int) -> str | None:
+        """Name the target of a tail call (a JMP out of the function) so that both
+        sides agree: by the original address of the function it lands in. None
+        when the database does not know the target."""
+        if img == ImageId.ORIG:
+            return f"orig:{addr:#x}" if self.db.get(ImageId.ORIG, addr) else None
+        entity = self.db.get(ImageId.RECOMP, addr)
+        if entity is None:
+            return None
+        if entity.orig_addr is not None:
+            return f"orig:{entity.orig_addr:#x}"
+        if self.call_options.resolve_wrapped_calls and entity.name is not None:
+            for value in numbers_in_name(entity.name):
+                target = self.db.get(ImageId.ORIG, value)
+                if target is not None and target.entity_type in (
+                    EntityType.FUNCTION,
+                    EntityType.THUNK,
+                ):
+                    return f"orig:{value:#x}"
+        return None
+
+    def _is_semantic_match(
+        self, match: ReccmpMatch, orig: AsmExcerpt, recomp: AsmExcerpt
+    ) -> bool:
+        # Both sides name a call target with the same text when it is the same
+        # function, so its calling convention can be read off the original binary.
+        by_text = {text: addr for addr, text in self.orig_sanitize.call_targets.items()}
+
+        def callee(text: str) -> CalleeInfo | None:
+            addr = by_text.get(text)
+            if addr is None:
+                return None
+            return analyze_callee(self._read_orig, addr, self.callee_memo)
+
+        def names(sanitize: ParseAsm) -> dict[str, int]:
+            return {text: addr for addr, text in sanitize.replacements.items()}
+
+        ok, _ = find_semantic_match(
+            orig,
+            recomp,
+            callee=callee,
+            orig_names=names(self.orig_sanitize),
+            recomp_names=names(self.recomp_sanitize),
+            tail_name=self._tail_call_name,
+            returns=return_kind_from_symbol(match.get("symbol")),
+        )
+        return ok
 
     def _source_ref_of_recomp_addr(self, recomp_addr: int | None) -> str | None:
         if recomp_addr is None:
@@ -206,12 +277,22 @@ class FunctionComparator:
             orig_combined, recomp_combined, line_annotations
         )
 
-        return self._compare_function_assembly(
+        result = self._compare_function_assembly(
             orig_combined,
             recomp_combined,
             split_points,
             self.locals_db.get(match.recomp_addr),
         )
+
+        if (
+            self.call_options.semantic_match
+            and result.match_ratio != 1.0
+            and not result.is_effective_match
+            and self._is_semantic_match(match, orig_combined, recomp_combined)
+        ):
+            result.is_effective_match = True
+
+        return result
 
     def _normalize_asm(
         self, orig: AsmExcerpt, recomp: AsmExcerpt
