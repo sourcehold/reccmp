@@ -156,3 +156,52 @@ MASM, define `__security_cookie`, `__security_cookie_complement` and a stubbed
 `__security_init_cookie` at the original addresses so that the CRT's
 `gs_cookie.obj` is never linked. That changes the binary you ship, while this
 option changes only the comparison.
+
+## Code that does the same thing in a different way
+
+Two compiles of the same source often differ only in *where* the compiler kept
+a value. A value lives in `ecx` on one side and in `eax` on the other, two
+independent loads come in the other order, a local gets another stack slot, or
+a conditional jump is inverted with its two successors swapped:
+
+```
+-mov eax, dword ptr [ecx + 4]          +mov eax, dword ptr [ecx + 4]
+-sub eax, dword ptr [ecx + 8]          +mov ecx, dword ptr [ecx + 8]
+-ret                                   +sub eax, ecx
+                                       +ret
+```
+
+Such a difference often follows from something the source cannot control,
+like the number of symbols in the translation unit, so the function never
+reaches 100% however it is written. reccmp already reports `100%*` (an
+*effective* match) when the listings have the same length and agree once every
+register name is blanked. That test misses the example above, where the
+instruction counts differ.
+
+`--semantic-match` adds a stronger test, run on every function that is neither
+an exact nor an effective match. It executes both listings symbolically, side
+by side, and reports `100%*` when they make the same observable decisions:
+
+* the same memory writes and calls, in the same order, with the same values,
+  arguments and `this`;
+* the same branch decisions, compared as conditions on the computed values;
+* the same return value, with the callee-saved registers and `esp` restored.
+
+Which register or stack slot holds a value, the order of independent loads and
+the layout of the blocks may differ. Loops are handled with a fixpoint over the
+values that agree on every path into the loop, so a function whose loop
+computes something different is still rejected.
+
+Calls are compared by target and arguments. The number of arguments a callee
+takes, and whether it reads `ecx` and `edx`, is read from the original binary.
+A tail call (a `jmp` out of the function) is compared by the original address
+of its target when the database knows it, and otherwise by its displacement,
+as the text diff does.
+
+The test errs on the side of "not equivalent". An instruction it does not
+model, a stack frame it cannot follow, or anything it cannot prove leaves the
+percentage as it was. It assumes the code was produced by a compiler: it does
+not consider a callee that overwrites the caller's saved registers, or a store
+through a pointer that hits the return address.
+
+The option is not enabled by default.

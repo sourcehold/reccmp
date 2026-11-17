@@ -6,6 +6,7 @@ from reccmp.cvdump.types import CvdumpTypesParser
 from reccmp.compare.db import EntityDb, ReccmpMatch
 from reccmp.compare.event import ReccmpEvent, ReccmpReportProtocol
 from reccmp.compare.functions import (
+    CallComparisonOptions,
     FunctionComparator,
     EntityCompareResult,
     create_valid_addr_lookup,
@@ -36,7 +37,7 @@ def fixture_report_mock() -> ReccmpReportProtocol:
     return Mock(spec=ReccmpReportProtocol)
 
 
-# pylint: disable=too-many-positional-arguments
+# pylint: disable=too-many-positional-arguments,too-many-arguments
 def compare_functions(
     db: EntityDb,
     lines_db: LinesDb,
@@ -44,6 +45,7 @@ def compare_functions(
     recomp: bytes,
     report: ReccmpReportProtocol,
     is_relocated_addr: Callable[[int], bool] | None = None,
+    call_options: CallComparisonOptions | None = None,
 ) -> EntityCompareResult:
     """Executes `FunctionComparator.compare_function` on the provided binary code."""
 
@@ -63,7 +65,13 @@ def compare_functions(
 
     # TODO: Refactor dependencies. GH #461
     comp = FunctionComparator(
-        db, lines_db, orig_bin, recomp_bin, report, CvdumpTypesParser()
+        db,
+        lines_db,
+        orig_bin,
+        recomp_bin,
+        report,
+        CvdumpTypesParser(),
+        call_options=call_options or CallComparisonOptions(),
     )
 
     return comp.compare_function(
@@ -678,3 +686,46 @@ def test_addr_test_entity_range_check_exclusive(db: EntityDb):
     assert addr_test(0x1000) is True
     assert addr_test(0x1001) is True
     assert addr_test(0x1002) is False
+
+
+def test_semantic_match(db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol):
+    """The same subtraction through a scratch register: the diff differs, the behaviour does not."""
+    # mov eax, [ecx + 4]; sub eax, [ecx + 8]; ret
+    orig = b"\x8b\x41\x04\x2b\x41\x08\xc3"
+    # mov eax, [ecx + 4]; mov ecx, [ecx + 8]; sub eax, ecx; ret
+    recomp = b"\x8b\x41\x04\x8b\x49\x08\x2b\xc1\xc3"
+
+    plain = compare_functions(db, lines_db, orig, recomp, report)
+    assert plain.match_ratio < 1.0
+    assert plain.is_effective_match is False
+
+    result = compare_functions(
+        db,
+        lines_db,
+        orig,
+        recomp,
+        report,
+        call_options=CallComparisonOptions(semantic_match=True),
+    )
+    assert result.match_ratio == plain.match_ratio
+    assert result.is_effective_match is True
+
+
+def test_semantic_mismatch(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    """The operands of the subtraction are the other way round."""
+    # mov eax, [ecx + 4]; sub eax, [ecx + 8]; ret
+    orig = b"\x8b\x41\x04\x2b\x41\x08\xc3"
+    # mov eax, [ecx + 8]; mov ecx, [ecx + 4]; sub eax, ecx; ret
+    recomp = b"\x8b\x41\x08\x8b\x49\x04\x2b\xc1\xc3"
+
+    result = compare_functions(
+        db,
+        lines_db,
+        orig,
+        recomp,
+        report,
+        call_options=CallComparisonOptions(semantic_match=True),
+    )
+    assert result.is_effective_match is False

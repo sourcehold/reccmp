@@ -201,6 +201,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--semantic-match",
+        action="store_true",
+        help=(
+            "Count a function as an effective match (100%%*) when symbolic execution "
+            "shows it behaves like the original: the same memory accesses, calls, "
+            "branch conditions and return values, whatever the register allocation, "
+            "stack layout or instruction order."
+        ),
+    )
+    parser.add_argument(
         "--nolib",
         action="store_true",
         help="Exclude LIBRARY annotations from the analysis",
@@ -215,7 +225,8 @@ def parse_args() -> argparse.Namespace:
         "--invalidate-cache",
         action="store_true",
         help="Run cvdump.exe even if a saved dump exists, and replace it "
-        "(implies --cache)")
+        "(implies --cache)",
+    )
     parser.add_argument(
         "--ignore-missing-symbols",
         action="store_true",
@@ -281,15 +292,16 @@ def main() -> int:
     logging.basicConfig(level=args.loglevel, format="[%(levelname)s] %(message)s")
 
     compare = Compare.from_target(
-        target, 
+        target,
         ignore_missing_symbols=args.ignore_missing_symbols,
         call_options=CallComparisonOptions(
             resolve_wrapped_calls=args.resolve_wrapped_calls,
             ignore_call_targets=args.ignore_call_targets,
             ignore_security_cookie=args.ignore_security_cookie,
+            semantic_match=args.semantic_match,
         ),
         cache=args.cache,
-        invalidate_cache=args.invalidate_cache
+        invalidate_cache=args.invalidate_cache,
     )
 
     print()
